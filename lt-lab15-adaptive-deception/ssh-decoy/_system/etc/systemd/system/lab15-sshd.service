@@ -1,0 +1,15 @@
+[Unit]
+Description=LAB15 Simulated SSH Honeypot
+After=network.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/sbin/lab15-start-guard
+ExecStartPre=/usr/bin/ssh-keygen -A
+ExecStartPre=/bin/mkdir -p /run/sshd
+ExecStart=/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config_lab15
+Restart=no
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

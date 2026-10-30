@@ -1,0 +1,11 @@
+[Unit]
+Description=LAB15 Lightweight SSH Probe Sensor
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/lab15-sensor
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

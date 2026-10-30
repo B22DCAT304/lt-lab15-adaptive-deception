@@ -1,0 +1,51 @@
+#!/usr/bin/python3
+import json
+import socket
+import socketserver
+import time
+from logging import Formatter, getLogger, INFO
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+LOG = Path("/var/log/lab15/probes.jsonl")
+LOG.parent.mkdir(parents=True, exist_ok=True)
+
+logger = getLogger("lab15-sensor")
+logger.setLevel(INFO)
+h = RotatingFileHandler(str(LOG), maxBytes=1048576, backupCount=2)
+h.setFormatter(Formatter("%(message)s"))
+logger.addHandler(h)
+
+class Handler(socketserver.BaseRequestHandler):
+    def handle(self):
+        event = {
+            "eventid": "lab15.probe.detected",
+            "src_ip": self.client_address[0],
+            "dst_ip": "172.31.65.40",
+            "dst_port": 2200,
+            "ts_epoch": time.time()
+        }
+        raw = json.dumps(event, sort_keys=True)
+        logger.info(raw)
+
+        try:
+            s = socket.create_connection(("10.60.215.10", 5514), 2)
+            s.sendall((raw + chr(10)).encode("utf-8"))
+            s.recv(32)
+            s.close()
+        except OSError:
+            pass
+
+        try:
+            self.request.sendall(
+                b"SSH-2.0-LAB15-Preauth-Sensor\r\n"
+            )
+        except OSError:
+            pass
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+server = Server(("172.31.65.40", 2200), Handler)
+server.serve_forever()

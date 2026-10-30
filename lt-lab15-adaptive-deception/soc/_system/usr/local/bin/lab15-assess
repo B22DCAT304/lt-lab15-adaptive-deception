@@ -1,0 +1,68 @@
+#!/usr/bin/python3
+import json
+import socket
+import time
+import uuid
+import sys
+from pathlib import Path
+
+base = Path("/var/log/lab15-soc")
+source = base / "events.jsonl"
+target = "172.31.65.50"
+
+if not source.exists():
+    sys.exit("LAB15_ASSESS_FAIL: no telemetry")
+
+now = time.time()
+events = []
+
+for line in source.open():
+    try:
+        e = json.loads(line)
+        age = now - float(e.get("ts_epoch", 0))
+        if (e.get("eventid") == "lab15.probe.detected"
+                and e.get("src_ip") == target
+                and e.get("dst_port") == 2200
+                and 0 <= age <= 180):
+            events.append(e)
+    except (ValueError, TypeError):
+        continue
+
+if len(events) < 3:
+    sys.exit("LAB15_ASSESS_FAIL: need 3 probes within 180 seconds")
+
+rid = "LAB15-" + uuid.uuid4().hex[:12]
+
+recommendation = {
+    "eventid": "lab15.deception.recommended",
+    "request_id": rid,
+    "src_ip": target,
+    "action": "activate_honeypot",
+    "probe_count": len(events),
+    "risk_score": 80,
+    "reason": "repeated_ssh_probe",
+    "created_at": now
+}
+
+try:
+    s = socket.create_connection(("10.60.215.40", 5515), 4)
+    s.settimeout(4)
+    s.sendall((json.dumps(recommendation) + "\n").encode())
+    reply = s.recv(128).decode().strip()
+    s.close()
+except OSError as e:
+    sys.exit("LAB15_ASSESS_FAIL: " + str(e))
+
+if reply != "OK":
+    sys.exit("LAB15_RECOMMENDATION_REJECTED: " + reply)
+
+base.mkdir(parents=True, exist_ok=True)
+with (base / "recommendations.jsonl").open("a") as f:
+    f.write(json.dumps(recommendation, sort_keys=True) + "\n")
+
+print("LAB15_RECOMMENDATION_PASS")
+print("REQUEST_ID:", rid)
+print("SOURCE_IP:", target)
+print("PROBE_COUNT:", len(events))
+print("RISK_SCORE: 80")
+print("STATUS: pending_approval")

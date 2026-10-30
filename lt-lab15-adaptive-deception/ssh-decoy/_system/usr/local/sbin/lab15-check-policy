@@ -1,0 +1,19 @@
+#!/bin/bash
+set -euo pipefail
+
+chain=LAB15_SSH
+out=/var/log/lab15/policy-verify.txt
+rm -f "$out"
+
+iptables -C INPUT -p tcp --dport 2222 -j "$chain"
+
+first=$(iptables -S "$chain" | sed -n '2p')
+last=$(iptables -S "$chain" | tail -n 1)
+
+echo "$first" |
+    grep -Eq -- '^-A LAB15_SSH -s 172\.31\.65\.50(/32)? -j DROP$'
+
+test "$last" = "-A LAB15_SSH -j DROP"
+
+echo "LAB15_FIREWALL_STATE_PASS" > "$out"
+echo "LAB15_FIREWALL_STATE_PASS"

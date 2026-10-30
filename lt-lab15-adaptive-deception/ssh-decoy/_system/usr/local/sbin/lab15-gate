@@ -1,0 +1,195 @@
+#!/usr/bin/python3
+import json
+import os
+import re
+import socketserver
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+ROOT = Path("/run/lab15-approval")
+REQUESTS = ROOT / "requests"
+TOKENS = ROOT / "tokens"
+USED = ROOT / "used"
+LOG = Path("/var/log/lab15/orchestration.jsonl")
+PROBES = Path("/var/log/lab15/probes.jsonl")
+PATTERN = re.compile(r"^LAB15-[a-f0-9]{12}$")
+
+for p in (REQUESTS, TOKENS, USED, LOG.parent):
+    p.mkdir(parents=True, exist_ok=True)
+
+os.chmod(str(ROOT), 0o700)
+
+def record(event, rid, **kwargs):
+    data = {
+        "eventid": event,
+        "request_id": rid,
+        "timestamp": time.time()
+    }
+    data.update(kwargs)
+    with LOG.open("a") as f:
+        f.write(json.dumps(data, sort_keys=True) + "\n")
+
+def load(rid):
+    if not PATTERN.match(rid):
+        sys.exit("DENIED: invalid request ID")
+    p = REQUESTS / (rid + ".json")
+    if not p.exists():
+        sys.exit("DENIED: request not found")
+    return p, json.loads(p.read_text())
+
+def validate_probes(source):
+    if not PROBES.exists():
+        return False
+    now = time.time()
+    count = 0
+    for line in PROBES.open():
+        try:
+            e = json.loads(line)
+            age = now - float(e.get("ts_epoch", 0))
+            if (e.get("eventid") == "lab15.probe.detected"
+                    and e.get("src_ip") == source
+                    and e.get("dst_port") == 2200
+                    and 0 <= age <= 180):
+                count += 1
+        except (ValueError, TypeError):
+            continue
+    return count >= 3
+
+class Handler(socketserver.StreamRequestHandler):
+    def handle(self):
+        if self.client_address[0] != "10.60.215.10":
+            return
+        try:
+            data = json.loads(self.rfile.readline(4096).decode("utf-8"))
+            rid = data.get("request_id", "")
+            valid = (
+                PATTERN.match(rid)
+                and data.get("eventid") == "lab15.deception.recommended"
+                and data.get("action") == "activate_honeypot"
+                and data.get("src_ip") == "172.31.65.50"
+                and int(data.get("risk_score", 0)) >= 70
+                and int(data.get("probe_count", 0)) >= 3
+                and validate_probes(data["src_ip"])
+            )
+            if not valid:
+                self.wfile.write(b"DENIED\n")
+                return
+
+            data["status"] = "pending_approval"
+            with (REQUESTS / (rid + ".json")).open("x") as f:
+                json.dump(data, f)
+            record("lab15.recommendation.accepted", rid,
+                   src_ip=data["src_ip"])
+            self.wfile.write(b"OK\n")
+        except (ValueError, TypeError, KeyError, OSError):
+            self.wfile.write(b"DENIED\n")
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit("Usage: lab15-gate listen|approve|activate|status")
+
+    action = sys.argv[1]
+
+    if action == "listen" and len(sys.argv) == 2:
+        server = Server(("10.60.215.40", 5515), Handler)
+        server.serve_forever()
+        return
+
+    if os.geteuid() != 0:
+        sys.exit("DENIED: privileged operation")
+
+    if len(sys.argv) != 3:
+        sys.exit("Usage: lab15-gate approve|activate|status REQUEST_ID")
+
+    rid = sys.argv[2]
+    path, req = load(rid)
+
+    if action == "status":
+        print("REQUEST_ID:", rid)
+        print("STATUS:", req["status"])
+        return
+
+    if action == "approve":
+        if req["status"] != "pending_approval":
+            sys.exit("DENIED: request not pending")
+
+        token = uuid.uuid4().hex
+        token_file = TOKENS / rid
+        with token_file.open("x") as f:
+            json.dump({"request_id": rid, "token": token}, f)
+        os.chmod(str(token_file), 0o600)
+
+        req["status"] = "approved"
+        req["approved_by"] = "human_operator"
+        req["approved_at"] = time.time()
+        path.write_text(json.dumps(req))
+
+        record("lab15.human_approval.granted", rid)
+        print("LAB15_HUMAN_APPROVAL_PASS")
+        return
+
+    if action == "activate":
+        if (USED / rid).exists():
+            record("lab15.activation.denied", rid,
+                   reason="approval_consumed")
+            sys.exit("DENIED: approval already consumed")
+
+        active = subprocess.run(
+            ["/bin/systemctl", "is-active", "--quiet",
+             "lab15-sshd.service"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        ).returncode == 0
+
+        if active:
+            record("lab15.activation.denied", rid,
+                   reason="honeypot_already_active")
+            sys.exit("DENIED: honeypot already active")
+
+        token_file = TOKENS / rid
+        if req["status"] != "approved" or not token_file.exists():
+            record("lab15.activation.denied", rid,
+                   reason=("approval_consumed" if (USED / rid).exists() else "missing_approval"))
+            sys.exit("DENIED: human approval required")
+
+        token = json.loads(token_file.read_text())
+        if token.get("request_id") != rid:
+            sys.exit("DENIED: approval request mismatch")
+
+        os.rename(str(token_file), str(USED / rid))
+        req["status"] = "approval_consumed"
+        path.write_text(json.dumps(req))
+        record("lab15.approval.consumed", rid)
+
+        try:
+            subprocess.check_call(
+                ["/usr/local/sbin/lab15-policy", "init"])
+            permit = ROOT / "start-permit"
+            permit.write_text(rid)
+            os.chmod(str(permit), 0o600)
+            subprocess.check_call(
+                ["/bin/systemctl", "start", "lab15-sshd.service"])
+        except subprocess.CalledProcessError:
+            (ROOT / "start-permit").exists() and (ROOT / "start-permit").unlink()
+            record("lab15.activation.failed", rid)
+            sys.exit("LAB15_ACTIVATION_FAIL")
+
+        req["status"] = "activated"
+        path.write_text(json.dumps(req))
+        record("lab15.honeypot.activated", rid,
+               src_ip=req["src_ip"])
+        print("LAB15_APPROVED_ACTIVATION_PASS")
+        print("REQUEST_ID:", rid)
+        return
+
+    sys.exit("Unknown action")
+
+if __name__ == "__main__":
+    main()

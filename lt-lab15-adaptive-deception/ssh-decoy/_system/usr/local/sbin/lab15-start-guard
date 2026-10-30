@@ -1,0 +1,37 @@
+#!/usr/bin/python3
+import json
+import re
+import sys
+from pathlib import Path
+
+base = Path("/run/lab15-approval")
+permit = base / "start-permit"
+
+def deny():
+    print("LAB15_START_DENIED: approved actuator required")
+    sys.exit(1)
+
+if not permit.is_file():
+    deny()
+
+rid = permit.read_text().strip()
+
+if not re.fullmatch(r"LAB15-[a-f0-9]{12}", rid):
+    deny()
+
+request = base / "requests" / (rid + ".json")
+used = base / "used" / rid
+
+if not request.is_file() or not used.is_file():
+    deny()
+
+try:
+    data = json.loads(request.read_text())
+except (OSError, ValueError):
+    deny()
+
+if data.get("status") != "approval_consumed":
+    deny()
+
+permit.unlink()
+print("LAB15_APPROVED_START_GUARD_PASS")

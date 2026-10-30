@@ -1,0 +1,11 @@
+[Unit]
+Description=LAB15 Approval Gated Deception Listener
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/lab15-gate listen
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

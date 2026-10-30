@@ -1,0 +1,19 @@
+#!/bin/bash
+set -euo pipefail
+
+case "${1:-}" in
+    start)
+        echo "DENIED: use approval-gated actuator"
+        exit 1
+        ;;
+    status)
+        systemctl is-active lab15-sshd.service
+        ;;
+    stop)
+        systemctl stop lab15-sshd.service
+        ;;
+    *)
+        echo "Usage: lab15-decoyctl start|status|stop"
+        exit 2
+        ;;
+esac
